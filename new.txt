@@ -1,0 +1,26 @@
+ssh -p 56239 root@69.176.92.121 -L 8000:localhost:8000
+Add cancellation (disconnect stops work) + frees slot
+Add backpressure (max in-flight + return 429 when saturated)
+Add metrics (TTFT, TPS, p50/p95/p99, queue depth, active req)
+Add loadgen script (concurrency sweep (1,2,4,8,16,32,..) + prompt-length sweeps)
+Run sweeps, save results (tables/plots/screenshots)
+Repro: Dockerfile + exact commands + GPU/driver + model/version
+Document in README (must be technical, not tutorial)
+Include 3  results:
+Throughput (tokens/sec) vs concurrency
+p95/p99 latency vs concurrency
+VRAM vs (max_model_len, concurrency)
+And 5 bullets of interpretation:
+why throughput saturates
+where p99 spikes and why
+what KV cache did to concurrency
+what batching helped/hurt
+1 knob that mattered most (max_num_seqs / max_model_len / quant)
+
+
+I want to be able to satisy this description:
+LLM Serving Bench and Ops Harness (vLLM) | Python, vLLM, FastAPI |
+Implemented streaming generation endpoint, health checks, and configurable serving knobs.
+Added cancellation on disconnect, backpressure (429), metrics (TTFT/TPS/p95/p99/queue depth), and a load generator to measure throughput/latency vs concurrency and prompt length (e.g., X tok/s @ conc=N; p99 TTFT=Y ms @ conc=N, model=M on GPU=G).
+Reported bottlenecks/tradeoffs with reproducible commands with hardware/model details in README.
+
