@@ -1,0 +1,385 @@
+================================================================================
+                    vLLM SERVING HARNESS - DEEP DIVE EXPLANATION
+                    For Aspiring ML Infra/Inference Engineers
+================================================================================
+
+This document explains everything about this project: what we built, why each
+piece matters, and the concepts you need to understand for ML inference work.
+
+================================================================================
+PART 1: WHAT IS THIS PROJECT?
+================================================================================
+
+This is a production-ready LLM inference server built on vLLM. It's not just
+"run a model and get outputs" - it's a complete serving harness with:
+
+  1. API Server (server/server.py)
+     - FastAPI wrapper around vLLM's AsyncLLMEngine
+     - Streaming and non-streaming endpoints
+     - Health checks and metrics
+
+  2. Load Generator (loadgen/loadgen.py)
+     - Async benchmarking tool
+     - Concurrency and prompt length sweeps
+     - Statistical analysis (p50/p95/p99)
+
+  3. Visualization (plots/plot_results.py)
+     - Automated graph generation
+     - Throughput, latency, and VRAM plots
+
+The "owner features" that differentiate this from a basic server:
+  - Cancellation: Stop generation when client disconnects
+  - Backpressure: Return 429 when server is saturated
+  - Metrics: Real-time TTFT, TPS, latency percentiles
+
+================================================================================
+PART 2: WHY vLLM? (The Core Innovation)
+================================================================================
+
+vLLM solves the #1 problem in LLM inference: memory inefficiency.
+
+THE PROBLEM:
+Traditional serving allocates a fixed KV cache per request. If you set
+max_seq_len=2048, every request reserves 2048 tokens of KV cache memory,
+even if the actual sequence is only 100 tokens. This wastes 95% of memory.
+
+THE SOLUTION - PAGED ATTENTION:
+vLLM treats KV cache like virtual memory:
+  - Memory is divided into fixed-size "pages" (blocks)
+  - Pages are allocated on-demand as tokens are generated
+  - Pages can be non-contiguous (like virtual memory)
+  - Unused pages are freed immediately
+
+Result: 2-4x more concurrent requests with the same GPU memory.
+
+CONTINUOUS BATCHING:
+Traditional batching waits for a batch to fill, then processes it together.
+Problem: Short sequences finish early but wait for long sequences.
+
+vLLM's continuous batching:
+  - New requests join the batch immediately (no waiting)
+  - Finished requests leave immediately (no blocking)
+  - GPU stays maximally utilized
+
+This is why we see 11x throughput scaling from c=1 to c=16.
+
+================================================================================
+PART 3: THE SERVER ARCHITECTURE
+================================================================================
+
+Here's how server/server.py works:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              FastAPI Application                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  /generate endpoint                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │ 1. Check backpressure (active_requests >= max_concurrent?)              ││
+│  │    → If yes: return HTTP 429 immediately                                ││
+│  │ 2. Increment active_requests counter                                    ││
+│  │ 3. Submit request to AsyncLLMEngine                                     ││
+│  │ 4. Stream tokens back OR collect and return                             ││
+│  │ 5. Track metrics (TTFT, total time, tokens)                             ││
+│  │ 6. Decrement active_requests counter                                    ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+├─────────────────────────────────────────────────────────────────────────────┤
+│  AsyncLLMEngine (vLLM's core)                                               │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │ - Manages GPU memory (paged attention)                                  ││
+│  │ - Schedules requests (continuous batching)                              ││
+│  │ - Runs inference (CUDA kernels)                                         ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────────────┘
+
+KEY IMPLEMENTATION DETAILS:
+
+1. Backpressure (lines 157-161 in server.py):
+   ```python
+   if self.active_requests >= self.max_concurrent_requests:
+       return JSONResponse(status_code=429, content={"error": "Server busy"})
+   ```
+   Why: Without this, unlimited requests queue up, causing OOM or unbounded
+   latency. The 429 tells clients to retry later.
+
+2. Cancellation (lines 233-265):
+   ```python
+   if await request.is_disconnected():
+       raise asyncio.CancelledError()
+   ```
+   Why: If a user closes their browser, we stop wasting GPU cycles on their
+   request. This frees the slot for other users.
+
+3. Metrics tracking:
+   - TTFT (Time-to-First-Token): Measures scheduler + prefill latency
+   - Total latency: Full request time
+   - TPS: Tokens per second (throughput)
+   - Percentiles: p50/p95/p99 show distribution, not just averages
+
+================================================================================
+PART 4: KEY METRICS AND WHAT THEY MEAN
+================================================================================
+
+TTFT (Time-to-First-Token):
+  - Time from request received to first token generated
+  - Dominated by: prompt processing (prefill phase)
+  - User perception: "How long until I see something?"
+  - Our results: 6.5ms (c=1) → 360ms (c=32 saturated)
+
+TPS (Tokens Per Second):
+  - Total tokens generated / total time
+  - Measures throughput (how much work the GPU does)
+  - Our results: 213 TPS (c=1) → 2367 TPS (c=16)
+
+Latency Percentiles:
+  - p50 (median): 50% of requests are faster than this
+  - p95: 95% of requests are faster (5% are slower)
+  - p99: 99% of requests are faster (1% tail latency)
+  - Why p99 matters: In production, the slowest 1% of requests often
+    determine user experience (everyone notices the slow one)
+
+WHAT SATURATION LOOKS LIKE:
+  Concurrency 16: TPS=2367, p99 TTFT=33ms   ← Healthy
+  Concurrency 32: TPS=2413, p99 TTFT=548ms  ← Saturated!
+
+  TPS barely increased (1.9%) but TTFT exploded (16x). This means:
+  - GPU is fully utilized (can't process faster)
+  - Requests are queueing (waiting for GPU time)
+  - Adding more load makes latency worse, not throughput better
+
+================================================================================
+PART 5: THE BENCHMARK RESULTS EXPLAINED
+================================================================================
+
+We tested Qwen2.5-1.5B (1.5 billion parameters) on RTX 4090:
+
+Concurrency | TPS    | p99 TTFT | What's Happening
+------------|--------|----------|------------------------------------------
+1           | 213.5  | 13.1ms   | Single request, no batching benefit
+2           | 402.7  | 10.6ms   | 1.9x speedup from batching 2 requests
+4           | 699.0  | 22.2ms   | 3.3x speedup, slight TTFT increase
+8           | 1289.8 | 23.6ms   | 6.0x speedup, batching very effective
+16          | 2367.8 | 33.4ms   | 11.1x speedup, optimal operating point
+32          | 2413.3 | 547.8ms  | SATURATED - latency explodes
+
+WHY DOES BATCHING HELP?
+The GPU has massive parallelism. Processing 1 request uses maybe 5% of
+the GPU. Processing 16 requests together uses 80%+. Same time, 16x output.
+
+WHY DOES SATURATION HAPPEN?
+Eventually the GPU runs out of:
+  1. Compute (matrix multiplication capacity)
+  2. Memory bandwidth (moving data to/from GPU)
+  3. KV cache memory (storing attention states)
+
+For Qwen2.5-1.5B on RTX 4090, compute was the bottleneck. We had plenty
+of KV cache (665K tokens, used ~65K) but the GPU couldn't multiply faster.
+
+WHAT THE GRAPHS SHOW:
+
+1. throughput_vs_concurrency.png:
+   - X-axis: Number of concurrent requests
+   - Y-axis: Tokens per second
+   - Shape: Linear increase, then plateau (saturation)
+
+2. latency_vs_concurrency.png:
+   - X-axis: Concurrency
+   - Y-axis: TTFT in milliseconds
+   - Shape: Gradual increase, then spike at saturation
+
+3. vram_usage.png:
+   - Shows estimated KV cache memory vs concurrency and max_model_len
+   - Helps predict when memory becomes the bottleneck
+
+================================================================================
+PART 6: PRODUCTION CONSIDERATIONS
+================================================================================
+
+CHOOSING max_num_seqs:
+This controls how many requests vLLM batches together.
+  - Too low: Underutilize GPU, low throughput
+  - Too high: Memory pressure, OOM risk
+  - Sweet spot: Where throughput plateaus but latency is acceptable
+
+For Qwen2.5-1.5B on 24GB: max_num_seqs=16 is optimal
+
+CHOOSING max_concurrent_requests:
+This is your backpressure threshold.
+  - Set it at or slightly above max_num_seqs
+  - Requests beyond this get 429 (rejected)
+  - Protects against cascading failures
+
+MONITORING IN PRODUCTION:
+Watch these metrics:
+  - p99 TTFT: If it spikes, you're saturating
+  - Queue depth: If it grows unbounded, you need more capacity
+  - 429 rate: If high, you need more GPUs or load balancing
+  - GPU utilization: Should be 70-90%, not 100% (headroom for spikes)
+
+SCALING STRATEGIES:
+1. Vertical: Bigger GPU (A100, H100)
+2. Horizontal: Multiple GPUs with load balancer
+3. Model optimization: Quantization (INT8, INT4), speculative decoding
+4. Caching: Prefix caching for common prompts
+
+================================================================================
+PART 7: THE CODE STRUCTURE
+================================================================================
+
+LLM_Serving/
+├── server/
+│   └── server.py         # 310 lines - FastAPI + vLLM integration
+│       Key classes:
+│       - MetricsStore: Tracks TTFT, TPS, percentiles
+│       - GenerateRequest: Pydantic model for input validation
+│       - lifespan(): Initializes AsyncLLMEngine on startup
+│       Key endpoints:
+│       - POST /generate: Main inference endpoint
+│       - GET /health: Returns status + active requests
+│       - GET /metrics: Returns full metrics dictionary
+│
+├── loadgen/
+│   └── loadgen.py        # 263 lines - Async benchmarking
+│       Key functions:
+│       - run_benchmark(): Single concurrency level test
+│       - run_concurrency_sweep(): Tests multiple concurrency levels
+│       - run_prompt_length_sweep(): Tests different prompt sizes
+│       Output: JSON with all metrics per test
+│
+├── plots/
+│   └── plot_results.py   # 133 lines - Matplotlib visualization
+│       Generates:
+│       - throughput_vs_concurrency.png
+│       - latency_vs_concurrency.png
+│       - vram_usage.png
+│
+├── results/
+│   ├── benchmark_results.json  # Raw data from loadgen
+│   └── results_table.md        # Markdown summary table
+│
+├── Dockerfile            # Container setup with CUDA
+├── requirements.txt      # Python dependencies
+└── README.md             # Full documentation
+
+================================================================================
+PART 8: CONCEPTS YOU NEED TO KNOW
+================================================================================
+
+For ML inference engineering, understand these deeply:
+
+1. ATTENTION MECHANISM
+   - Transformers compute attention between all token pairs
+   - KV cache stores key/value vectors to avoid recomputation
+   - Memory scales as: O(batch_size × seq_len × hidden_dim)
+
+2. PREFILL VS DECODE
+   - Prefill: Process entire prompt at once (compute-bound)
+   - Decode: Generate one token at a time (memory-bound)
+   - TTFT is mostly prefill time
+   - Total latency includes both
+
+3. BATCHING STRATEGIES
+   - Static batching: Wait for N requests, process together
+   - Dynamic batching: Timeout-based collection
+   - Continuous batching: Requests join/leave freely (vLLM)
+
+4. MEMORY HIERARCHY
+   - GPU HBM (24GB on 4090): Model weights + KV cache
+   - GPU SRAM (L2 cache): Active computation
+   - CPU RAM: Overflow, model loading
+   - Disk: Model storage
+
+5. QUANTIZATION
+   - FP32 → FP16/BF16: 2x memory savings, minimal quality loss
+   - INT8: 4x savings, slight quality loss
+   - INT4: 8x savings, noticeable quality loss
+   - Trade-off: Memory/speed vs output quality
+
+6. TENSOR PARALLELISM
+   - Split model across multiple GPUs
+   - Each GPU holds part of each layer
+   - Communication overhead between GPUs
+
+================================================================================
+PART 9: HOW THIS PROJECT WAS BUILT
+================================================================================
+
+Step 1: Server Implementation
+  - Started with vLLM's AsyncLLMEngine
+  - Wrapped in FastAPI for HTTP interface
+  - Added streaming support with StreamingResponse
+  - Implemented backpressure with active request counting
+  - Added cancellation detection in streaming loop
+
+Step 2: Metrics System
+  - Created MetricsStore class to track all timing
+  - Record TTFT when first token arrives
+  - Calculate percentiles using numpy
+  - Expose via /metrics endpoint
+
+Step 3: Load Generator
+  - Used aiohttp for async HTTP requests
+  - asyncio.Semaphore for concurrency control
+  - Gather statistics across all requests
+  - Output to JSON for plotting
+
+Step 4: Benchmarking
+  - Deployed to vast.ai GPU instance (RTX 4090)
+  - Installed vLLM 0.13.0
+  - Ran concurrency sweep: 1, 2, 4, 8, 16, 32
+  - Identified saturation point at c=32
+
+Step 5: Analysis
+  - Generated plots showing scaling and saturation
+  - Wrote interpretation explaining WHY results look this way
+  - Documented reproduction steps
+
+================================================================================
+PART 10: NEXT STEPS FOR LEARNING
+================================================================================
+
+To go deeper in ML inference:
+
+1. READ THE vLLM PAPER
+   "Efficient Memory Management for Large Language Model Serving with PagedAttention"
+   Understand paged attention in detail.
+
+2. PROFILE GPU USAGE
+   Use nvidia-smi, Nsight Systems, or PyTorch profiler to see where time goes.
+
+3. TRY DIFFERENT MODELS
+   - Larger models (7B, 13B) - see memory become the bottleneck
+   - Different architectures (Llama, Mistral, Mixtral)
+
+4. IMPLEMENT OPTIMIZATIONS
+   - Prefix caching (reuse KV cache for common prefixes)
+   - Speculative decoding (small model predicts, large model verifies)
+   - Quantization (INT8, AWQ, GPTQ)
+
+5. STUDY PRODUCTION SYSTEMS
+   - TensorRT-LLM (NVIDIA's inference engine)
+   - TGI (HuggingFace's Text Generation Inference)
+   - Triton Inference Server
+
+6. DISTRIBUTED INFERENCE
+   - Tensor parallelism across GPUs
+   - Pipeline parallelism for very large models
+   - Ray Serve for orchestration
+
+================================================================================
+SUMMARY
+================================================================================
+
+This project demonstrates:
+
+1. HOW to build a production LLM server (not just inference code)
+2. WHY vLLM is fast (paged attention, continuous batching)
+3. WHAT metrics matter (TTFT, TPS, p99 latency)
+4. WHERE saturation happens (and how to find it)
+5. WHEN to use backpressure (protect against overload)
+
+The key insight: ML inference isn't just about running models. It's about
+building systems that are fast, reliable, and observable under real load.
+
+================================================================================
+                                  END OF DOCUMENT
+================================================================================
