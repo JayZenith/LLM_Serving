@@ -233,7 +233,7 @@ async def main():
     parser.add_argument("--concurrency-levels", type=str, default="1,2,4,8,16,32", help="Comma-separated concurrency levels")
     parser.add_argument("--prompt-lengths", type=str, default="10,50,100,200,500", help="Comma-separated prompt token counts")
     parser.add_argument("--requests", type=int, default=100, help="Requests per concurrency level")
-    parser.add_argument("--output", type=str, default="benchmark_results.json", help="Output JSON file")
+    parser.add_argument("--output", type=str, default="results/benchmark_results.json", help="Output JSON file")
     parser.add_argument("--mode", type=str, default="concurrency", choices=["concurrency", "prompt"], help="Sweep mode")
 
     args = parser.parse_args()

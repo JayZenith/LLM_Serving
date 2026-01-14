@@ -18,7 +18,6 @@ def load_results(filename: str) -> List[Dict[str, Any]]:
 def plot_throughput_vs_concurrency(results: List[Dict[str, Any]], output_file: str):
     """Plot throughput vs concurrency."""
     df = pd.DataFrame(results)
-    df = df[df['prompt_tokens'] == 8]  # Fixed prompt length for comparison
 
     plt.figure(figsize=(10, 6))
     plt.plot(df['concurrency'], df['tokens_per_second'], marker='o', linewidth=2)
@@ -33,7 +32,6 @@ def plot_throughput_vs_concurrency(results: List[Dict[str, Any]], output_file: s
 def plot_latency_vs_concurrency(results: List[Dict[str, Any]], output_file: str):
     """Plot p95/p99 latency vs concurrency."""
     df = pd.DataFrame(results)
-    df = df[df['prompt_tokens'] == 8]  # Fixed prompt length
 
     plt.figure(figsize=(10, 6))
     plt.plot(df['concurrency'], df['p95_ttft_ms'], marker='s', label='P95 TTFT', linewidth=2)
@@ -79,7 +77,6 @@ def plot_vram_usage(results: List[Dict[str, Any]], output_file: str):
 def generate_table(results: List[Dict[str, Any]], filename: str):
     """Generate markdown table of results."""
     df = pd.DataFrame(results)
-    df = df[df['prompt_tokens'] == 8]  # Fixed prompt length
 
     table = "| Concurrency | TPS | Avg TTFT | P95 TTFT | P99 TTFT | P95 Total | P99 Total |\n"
     table += "|------------|-----|----------|----------|----------|-----------|-----------|\n"
@@ -95,7 +92,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate benchmark plots")
-    parser.add_argument("--results", type=str, default="benchmark_results.json", help="Results JSON file")
+    parser.add_argument("--results", type=str, default="results/benchmark_results.json", help="Results JSON file")
     parser.add_argument("--output-dir", type=str, default="plots", help="Output directory")
 
     args = parser.parse_args()
