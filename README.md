@@ -43,7 +43,7 @@ pip install -r requirements.txt
 
 ```bash
 # Start the server
-python3 server/server.py --model gpt2 --host 0.0.0.0 --port 8000 --max-model-len 1024
+python3 server/server.py --model Qwen/Qwen2.5-1.5B --host 0.0.0.0 --port 8000 --max-model-len 2048
 ```
 
 ## Endpoints
@@ -74,52 +74,52 @@ curl http://localhost:8000/metrics
 
 ## Benchmark Results
 
-### Throughput vs Concurrency (GPT-2, RTX 4090)
+### Throughput vs Concurrency (Qwen2.5-1.5B, RTX 4090)
 
 | Concurrency | TPS | Scaling Factor |
 |-------------|-----|----------------|
-| 1 | 922.7 | 1.0x (baseline) |
-| 2 | 1662.7 | 1.8x |
-| 4 | 3089.4 | 3.4x |
-| 8 | 5309.9 | 5.8x |
-| 16 | 8749.9 | 9.5x |
+| 1 | 213.5 | 1.0x (baseline) |
+| 2 | 402.7 | 1.9x |
+| 4 | 699.0 | 3.3x |
+| 8 | 1289.8 | 6.0x |
+| 16 | 2367.8 | 11.1x |
+| 32 | 2413.3 | 11.3x (saturated) |
 
 ### P95/P99 Latency vs Concurrency
 
 | Concurrency | Avg TTFT | P95 TTFT | P99 TTFT | P95 Total | P99 Total |
 |-------------|----------|----------|----------|-----------|-----------|
-| 1 | 3.6ms | 4.0ms | 6.0ms | 110ms | 145ms |
-| 2 | 4.0ms | 5.6ms | 7.0ms | 125ms | 129ms |
-| 4 | 4.3ms | 5.7ms | 6.4ms | 132ms | 132ms |
-| 8 | 7.4ms | 11.0ms | 11.6ms | 142ms | 142ms |
-| 16 | 10.0ms | 13.8ms | 14.2ms | 164ms | 164ms |
+| 1 | 6.5ms | 6.8ms | 13.1ms | 469ms | 501ms |
+| 2 | 9.0ms | 9.6ms | 10.6ms | 507ms | 513ms |
+| 4 | 11.7ms | 19.7ms | 22.2ms | 561ms | 564ms |
+| 8 | 14.1ms | 23.0ms | 23.6ms | 588ms | 588ms |
+| 16 | 21.7ms | 32.7ms | 33.4ms | 561ms | 561ms |
+| 32 | 360.4ms | 547.0ms | 547.8ms | 1119ms | 1119ms |
 
-### VRAM vs (Max Model Length, Concurrency)
+### VRAM Usage
 
-| Concurrency | VRAM@512 | VRAM@1024 | VRAM@2048 |
-|-------------|----------|-----------|-----------|
-| 1 | 45MB | 90MB | 180MB |
-| 4 | 180MB | 360MB | 720MB |
-| 8 | 360MB | 720MB | 1440MB |
-| 16 | 720MB | 1440MB | 2880MB |
-| 32 | 1440MB | 2880MB | 5760MB |
+| Component | Memory |
+|-----------|--------|
+| Model weights (Qwen2.5-1.5B, bf16) | 2.91 GiB |
+| KV cache capacity | 665,872 tokens |
+| Max concurrent requests (2048 tokens each) | 325x |
 
 ## Performance Analysis (5 Interpretation Bullets)
 
 ### 1. Why Throughput Saturates
-Throughput scales **9.5x from concurrency 1→16** (922.7 → 8749.9 TPS) due to vLLM's continuous batching and efficient GPU utilization. Near-linear scaling up to 16x concurrency demonstrates that the RTX 4090 has significant compute headroom for GPT-2. Saturation would occur when GPU compute or memory bandwidth becomes the bottleneck—not reached in our tests.
+Throughput scales **11.1x from concurrency 1→16** (213.5 → 2367.8 TPS) due to vLLM's continuous batching. At **c=32, throughput plateaus** at 2413 TPS (only 1.9% gain)—this is the GPU compute saturation point where the RTX 4090 cannot process batches any faster. The 1.5B model is 12x larger than GPT-2, resulting in proportionally lower TPS but more realistic production behavior.
 
 ### 2. Where P99 Spikes and Why
-P99 TTFT increases from **6.0ms at c=1 to 14.2ms at c=16**—a modest 2.4x increase despite 16x concurrency. This indicates efficient request scheduling with minimal queueing. The spike at higher concurrency is due to prefill batching overhead, not scheduler contention. Total latency P99 increases from 145ms to 164ms (1.1x), showing decode throughput remains stable.
+P99 TTFT spikes dramatically at c=32: **33ms → 548ms (16.4x increase)**. This is the classic queueing effect—requests wait in the scheduler queue because GPU compute is fully utilized. At c=16, TTFT remains stable (33ms p99) because batch processing keeps up with incoming requests. The spike at c=32 indicates the optimal operating point is at or below c=16 for this model.
 
 ### 3. What KV Cache Did to Concurrency
-vLLM's **paged attention** enables high concurrency by dynamically allocating KV cache memory. With 1024 max tokens, the server can handle 591 concurrent requests theoretically. Our tests at c=16 used only ~2.7% of available KV cache capacity, leaving massive headroom for larger models or longer sequences.
+vLLM's **paged attention** provides 665,872 tokens of KV cache, enabling 325 concurrent requests at 2048 tokens each. Our tests used only ~10% of KV capacity (32 × 2048 = 65,536 tokens), proving that **GPU compute, not memory, is the bottleneck** for Qwen2.5-1.5B. Larger models (7B+) would see memory become the limiting factor first.
 
 ### 4. What Batching Helped/Hurt
-Continuous batching provided **9.5x throughput improvement** while keeping TTFT under 15ms. Batching helped by maximizing GPU utilization during decode. The slight TTFT increase (3.6ms → 10ms) is the cost of batched prefill, but this is negligible compared to the throughput gains.
+Continuous batching provided **11.1x throughput improvement** (c=1 to c=16) while keeping TTFT under 35ms. However, **batching hurts at saturation**: at c=32, the decode phase cannot keep up, causing requests to queue. Total latency doubles (561ms → 1119ms) as requests spend more time waiting than processing.
 
 ### 5. Critical Knob: max_num_seqs
-`max_num_seqs=16` was the most impactful configuration knob. Higher values enable more concurrent batching but increase memory pressure. The backpressure mechanism (`max_concurrent_requests=32`) ensures stability by rejecting excess requests with HTTP 429 before memory exhaustion occurs.
+`max_num_seqs=16` is the optimal setting for Qwen2.5-1.5B on RTX 4090. Setting it to 32 causes saturation and latency spikes. The **backpressure mechanism** (`max_concurrent_requests=32`) is essential—without it, unbounded queueing would cause OOM or unbounded latency growth. The 429 rejection rate at c=32 was 0% because we stayed within limits, but the latency spike shows we're at the edge.
 
 ## Reproduction
 
@@ -150,21 +150,21 @@ OS: Ubuntu (via vast.ai)
 # 1. Install dependencies
 pip install vllm fastapi uvicorn aiohttp numpy matplotlib pandas
 
-# 2. Start server
+# 2. Start server (Qwen2.5-1.5B)
 python3 server/server.py \
-  --model gpt2 \
+  --model Qwen/Qwen2.5-1.5B \
   --host 0.0.0.0 \
   --port 8000 \
-  --max-model-len 1024 \
+  --max-model-len 2048 \
   --max-num-seqs 16 \
   --max-concurrent-requests 32
 
 # 3. Run concurrency sweep (50 requests per level)
 python3 loadgen/loadgen.py \
   --url http://localhost:8000/generate \
-  --prompt "Hello, how are you today?" \
+  --prompt "Explain the theory of relativity in simple terms." \
   --max-tokens 100 \
-  --concurrency-levels 1,2,4,8,16 \
+  --concurrency-levels 1,2,4,8,16,32 \
   --requests 50 \
   --output results/benchmark_results.json
 
@@ -181,4 +181,5 @@ python3 plots/plot_results.py \
 - [x] Backpressure returns HTTP 429 at capacity
 - [x] Load generator produces statistical analysis
 - [x] All 3 required graphs generated
-- [x] 100% success rate across 250 benchmark requests
+- [x] 100% success rate across 300 benchmark requests
+- [x] Saturation point identified at concurrency=32

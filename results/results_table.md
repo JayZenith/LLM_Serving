@@ -1,28 +1,30 @@
 # Benchmark Results
 
-## Concurrency Sweep Results (GPT-2, RTX 4090)
+## Concurrency Sweep Results (Qwen2.5-1.5B, RTX 4090)
 
 | Concurrency | TPS | Avg TTFT (ms) | P95 TTFT (ms) | P99 TTFT (ms) | P95 Latency (ms) | P99 Latency (ms) |
 |-------------|-----|---------------|---------------|---------------|------------------|------------------|
-| 1 | 922.7 | 3.63 | 3.98 | 6.02 | 110.26 | 145.29 |
-| 2 | 1662.7 | 4.01 | 5.63 | 7.01 | 125.26 | 129.45 |
-| 4 | 3089.4 | 4.33 | 5.74 | 6.44 | 131.66 | 132.41 |
-| 8 | 5309.9 | 7.37 | 11.02 | 11.60 | 141.87 | 142.27 |
-| 16 | 8749.9 | 9.98 | 13.83 | 14.22 | 164.33 | 164.46 |
+| 1 | 213.5 | 6.5 | 6.8 | 13.1 | 469.3 | 500.7 |
+| 2 | 402.7 | 9.0 | 9.6 | 10.6 | 507.3 | 513.1 |
+| 4 | 699.0 | 11.7 | 19.7 | 22.2 | 560.6 | 563.5 |
+| 8 | 1289.8 | 14.1 | 23.0 | 23.6 | 588.0 | 588.2 |
+| 16 | 2367.8 | 21.7 | 32.7 | 33.4 | 560.6 | 561.0 |
+| 32 | 2413.3 | 360.4 | 547.0 | 547.8 | 1119.0 | 1119.4 |
 
 ## Key Observations
 
-- **Near-Linear Throughput Scaling**: TPS scales from 922.7 (c=1) to 8749.9 (c=16), a **9.5x improvement**
-- **Excellent TTFT**: Time-to-first-token remains under 15ms even at concurrency=16
-- **Stable P99 Latency**: P99 stays within 20ms of P95 across all concurrency levels
-- **100% Success Rate**: All 250 requests completed successfully (0 failures, 0 rate-limited)
-- **GPU Efficiency**: vLLM's continuous batching enables near-linear scaling up to 16x concurrency
+- **Throughput Saturation at c=32**: TPS plateaus at ~2400 (only 1.9% increase from c=16)
+- **P99 TTFT Spike**: 33ms at c=16 → 548ms at c=32 (16.4x increase = queueing)
+- **Linear Scaling up to c=16**: 11.1x throughput improvement before saturation
+- **100% Success Rate**: All 300 requests completed (0 failures, 0 rate-limited)
+- **GPU Compute Bound**: Saturation indicates GPU reached maximum batch processing capacity
 
 ## Test Configuration
 
-- **Model**: GPT-2 (124M parameters)
+- **Model**: Qwen/Qwen2.5-1.5B (1.5B parameters)
 - **GPU**: NVIDIA RTX 4090 (24GB VRAM)
-- **Max Model Length**: 1024 tokens
+- **Model Memory**: 2.91 GiB
+- **Max Model Length**: 2048 tokens
 - **Max Tokens Generated**: 100 per request
 - **Requests per Level**: 50
 - **vLLM Version**: 0.13.0
