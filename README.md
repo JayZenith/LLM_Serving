@@ -71,6 +71,8 @@ docker run --gpus all -it vllm-server:latest \
 - [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed
 - Docker 20.10+ with GPU support
 
+**Note:** Docker was not tested during development because the GPU instance (vast.ai) was already running inside a container, which doesn't support Docker-in-Docker. The Dockerfile is provided for users with native Docker access on bare-metal or VM hosts.
+
 ## Usage
 
 ```bash
