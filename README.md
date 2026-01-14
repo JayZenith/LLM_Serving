@@ -35,9 +35,41 @@ LLM_Serving/
 
 ## Installation
 
+### Option 1: pip install (recommended for development)
 ```bash
 pip install -r requirements.txt
 ```
+
+### Option 2: Docker (recommended for production)
+```bash
+# Build the image
+docker build -t vllm-server:latest .
+
+# Run with GPU support (requires nvidia-container-toolkit)
+docker run --gpus all -p 8000:8000 vllm-server:latest
+
+# Run with custom model
+docker run --gpus all -p 8000:8000 vllm-server:latest \
+  python3 server/server.py \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --model Qwen/Qwen2.5-1.5B \
+  --max-model-len 2048 \
+  --max-num-seqs 16 \
+  --max-concurrent-requests 32
+
+# Run benchmark inside container
+docker run --gpus all -it vllm-server:latest \
+  python3 loadgen/loadgen.py \
+  --url http://localhost:8000/generate \
+  --concurrency-levels 1,2,4,8,16 \
+  --requests 50
+```
+
+**Docker Prerequisites:**
+- NVIDIA GPU with CUDA 12.x
+- [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed
+- Docker 20.10+ with GPU support
 
 ## Usage
 
