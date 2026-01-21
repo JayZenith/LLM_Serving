@@ -29,18 +29,18 @@ LLM_Serving/
 - `/health` - Health check with status and metrics
 - `/metrics` - Real-time performance metrics (TTFT, TPS, p50/p95/p99)
 - `/models` - List available models (OpenAI-compatible)
-- **Cancellation** - Client disconnect stops generation and frees resources
-- **Backpressure** - Returns HTTP 429 when server is saturated
+- Cancellation - Client disconnect stops generation and frees resources
+- Backpressure - Returns HTTP 429 when server is saturated
 - Configurable: `max_model_len`, `max_num_seqs`, `dtype`, `quantization`
 
 ## Installation
 
-### Option 1: pip install (recommended for development)
+### Option 1: pip install 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Option 2: Docker (recommended for production)
+### Option 2: Docker 
 ```bash
 # Build the image
 docker build -t vllm-server:latest .
@@ -68,10 +68,9 @@ docker run --gpus all -it vllm-server:latest \
 
 **Docker Prerequisites:**
 - NVIDIA GPU with CUDA 12.x
-- [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed
+- nvidia-container-toolkit installed
 - Docker 20.10+ with GPU support
 
-**Note:** The Docker setup was not tested during development. I don't have a local GPU, so I used a vast.ai cloud instance for all benchmarking. Since vast.ai instances run inside containers, Docker-in-Docker is not supported there. If you have a native Docker setup with GPU access, you can test and use the Dockerfile yourself.
 
 ## Usage
 
@@ -138,13 +137,13 @@ curl http://localhost:8000/metrics
 | KV cache capacity | 665,872 tokens |
 | Max concurrent requests (2048 tokens each) | 325x |
 
-## Performance Analysis (5 Interpretation Bullets)
+## Performance Analysis
 
 ### 1. Why Throughput Saturates
-Throughput scales **11.1x from concurrency 1→16** (213.5 → 2367.8 TPS) due to vLLM's continuous batching. At **c=32, throughput plateaus** at 2413 TPS (only 1.9% gain)—this is the GPU compute saturation point where the RTX 4090 cannot process batches any faster. The 1.5B model is 12x larger than GPT-2, resulting in proportionally lower TPS but more realistic production behavior.
+Throughput scales **11.1x from concurrency 1→16** (213.5 → 2367.8 TPS) due to vLLM's continuous batching. At **c=32, throughput plateaus** at 2413 TPS (only 1.9% gain), this is the GPU compute saturation point where the RTX 4090 cannot process batches any faster. 
 
 ### 2. Where P99 Spikes and Why
-P99 TTFT spikes dramatically at c=32: **33ms → 548ms (16.4x increase)**. This is the classic queueing effect—requests wait in the scheduler queue because GPU compute is fully utilized. At c=16, TTFT remains stable (33ms p99) because batch processing keeps up with incoming requests. The spike at c=32 indicates the optimal operating point is at or below c=16 for this model.
+P99 TTFT spikes dramatically at c=32: **33ms → 548ms (16.4x increase)**. This is the classic queueing effect, requests wait in the scheduler queue because GPU compute is fully utilized. At c=16, TTFT remains stable (33ms p99) because batch processing keeps up with incoming requests. The spike at c=32 indicates the optimal operating point is at or below c=16 for this model.
 
 ### 3. What KV Cache Did to Concurrency
 vLLM's **paged attention** provides 665,872 tokens of KV cache, enabling 325 concurrent requests at 2048 tokens each. Our tests used only ~10% of KV capacity (32 × 2048 = 65,536 tokens), proving that **GPU compute, not memory, is the bottleneck** for Qwen2.5-1.5B. Larger models (7B+) would see memory become the limiting factor first.
@@ -153,7 +152,7 @@ vLLM's **paged attention** provides 665,872 tokens of KV cache, enabling 325 con
 Continuous batching provided **11.1x throughput improvement** (c=1 to c=16) while keeping TTFT under 35ms. However, **batching hurts at saturation**: at c=32, the decode phase cannot keep up, causing requests to queue. Total latency doubles (561ms → 1119ms) as requests spend more time waiting than processing.
 
 ### 5. Critical Knob: max_num_seqs
-`max_num_seqs=16` is the optimal setting for Qwen2.5-1.5B on RTX 4090. Setting it to 32 causes saturation and latency spikes. The **backpressure mechanism** (`max_concurrent_requests=32`) is essential—without it, unbounded queueing would cause OOM or unbounded latency growth. The 429 rejection rate at c=32 was 0% because we stayed within limits, but the latency spike shows we're at the edge.
+`max_num_seqs=16` is the optimal setting for Qwen2.5-1.5B on RTX 4090. Setting it to 32 causes saturation and latency spikes. The **backpressure mechanism** (`max_concurrent_requests=32`) is essential, without it, unbounded queueing would cause OOM or unbounded latency growth. The 429 rejection rate at c=32 was 0% because we stayed within limits, but the latency spike shows we're at the edge.
 
 ## Reproduction
 
@@ -208,12 +207,4 @@ python3 plots/plot_results.py \
   --output-dir plots
 ```
 
-### Results Validation
-- [x] Health endpoint returns status and metrics
-- [x] Generate endpoint returns TTFT and total latency
-- [x] Metrics endpoint provides real-time p50/p95/p99
-- [x] Backpressure returns HTTP 429 at capacity
-- [x] Load generator produces statistical analysis
-- [x] All 3 required graphs generated
-- [x] 100% success rate across 300 benchmark requests
-- [x] Saturation point identified at concurrency=32
+
